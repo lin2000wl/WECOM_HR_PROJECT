@@ -7,10 +7,10 @@
 ## 项目概述
 
 本项目是一个完整的智能招聘解决方案，包含以下核心组件：
-1. **在线用户交互流程** - 通过企业微信应用处理招聘查询
-2. **后台简历处理流程** - 自动化处理和入库PDF简历
-3. **URL验证服务** - 独立的企业微信回调URL验证服务
-4. **代理转发服务** - HTTP代理转发服务，解决内网部署问题
+1. **智能招聘机器人主服务** - 通过企业微信应用处理招聘查询和简历管理
+2. **URL验证服务** (`url_verification/`) - 独立的企业微信回调URL验证服务
+3. **代理转发服务** (`wework_proxy_app/`) - HTTP代理转发服务，解决内网部署问题
+4. **后台简历处理流程** - 自动化处理和入库PDF简历
 
 ## 主要功能
 
@@ -63,13 +63,13 @@
 ### 🔐 URL验证服务 (`url_verification/`)
 *   **独立验证服务:** 基于Flask的企业微信回调URL验证服务
 *   **加密解密:** 完整的企业微信消息加解密功能
-*   **多端点支持:** 支持多种回调路径配置
+*   **多端点支持:** 支持多种回调路径配置（`/`, `/wework-callback`, `/wechat_callback`）
 *   **调试友好:** 详细的请求日志和错误处理
-*   **快速部署:** 独立运行，便于测试和调试
+*   **快速部署:** 独立运行，便于测试和调试企业微信回调配置
 
 ### 🌐 代理转发服务 (`wework_proxy_app/`)
 *   **透明代理:** HTTP请求透明转发，保持数据完整性
-*   **路径映射:** 自动处理`/wework-callback/*`路径转发
+*   **路径映射:** 自动处理`/wework-callback/*`路径转发到内网目标服务器
 *   **错误处理:** 完善的超时和连接错误处理机制
 *   **生产就绪:** 支持负载均衡和反向代理配置
 *   **内网穿透:** 解决企业微信回调URL必须公网访问的问题
@@ -77,7 +77,7 @@
 ## 技术架构
 
 ### 核心技术栈
-*   **后端框架:** FastAPI + Uvicorn (ASGI服务器)
+*   **后端框架:** FastAPI + Uvicorn (主服务) / Flask (验证和代理服务)
 *   **企业微信集成:** httpx (API调用) + WXBizMsgCrypt (消息加解密)
 *   **自然语言处理:** DeepSeek LLM API (通过 openai SDK)
 *   **数据库:** MongoDB + pymongo 驱动
@@ -94,6 +94,61 @@
 *   **候选人信息:** 基本信息、工作经历、教育背景、技能证书
 *   **查询标签:** 优化的检索字段（positions, skills, degrees, certifications等）
 *   **文件路径:** 标准化的简历文件存储路径
+
+## 项目结构
+
+```
+HR_Project_Bot_2.0/
+├── src/                          # 主要源代码
+│   ├── main_ew.py               # 企业微信版主应用 (FastAPI)
+│   ├── enterprise_wechat_service.py  # 企业微信API服务
+│   ├── core_processor_ew.py     # 核心处理器
+│   ├── db_interface.py          # 数据库接口
+│   ├── llm_client.py           # LLM客户端
+│   ├── state_manager.py        # 状态管理器
+│   ├── config_ew.py            # 企业微信配置
+│   ├── logger.py               # 日志模块
+│   ├── handlers/               # 业务处理器
+│   │   ├── auth_handler_ew.py  # 认证处理器
+│   │   ├── intent_handler.py   # 意图识别
+│   │   ├── query_handler.py    # 查询处理
+│   │   └── selection_handler.py # 选择处理
+│   ├── models/                 # 数据模型
+│   │   └── candidate.py        # 候选人模型
+│   ├── processors/             # 专用处理器
+│   │   └── sync_processor.py   # 外部联系人同步处理器
+│   ├── resume_pipeline/        # 简历处理管道
+│   │   ├── trigger.py          # 触发器
+│   │   ├── scanner.py          # 文件扫描器
+│   │   ├── text_extractor.py   # 文本提取器
+│   │   ├── ocr_processor.py    # OCR处理器
+│   │   ├── resume_parser.py    # 简历解析器
+│   │   ├── validator_standardizer.py # 校验标准化器
+│   │   ├── file_manager.py     # 文件管理器
+│   │   └── db_updater.py       # 数据库更新器
+│   └── utils/                  # 工具函数
+│       └── scoring_utils.py    # 评分工具
+├── url_verification/           # URL验证服务
+│   ├── app.py                  # Flask验证应用
+│   ├── crypto_utils.py         # 加密解密工具
+│   ├── requirements.txt        # 验证服务依赖
+│   └── README.md              # 验证服务文档
+├── wework_proxy_app/          # 代理转发服务
+│   ├── app.py                 # Flask代理应用
+│   ├── requirements.txt       # 代理服务依赖
+│   └── README.md             # 代理服务文档
+├── data/                      # 原始简历文件
+│   ├── error/                 # 处理失败的文件
+│   └── pending/               # 待人工处理的文件
+├── processed_resumes/         # 处理成功的简历
+├── logs/                      # 日志文件
+├── tests/                     # 测试文件
+├── docs/                      # 项目文档
+├── config.yaml               # 主配置文件
+├── requirements.txt          # 主项目依赖
+├── .env.example             # 环境变量示例
+└── README.md                # 项目说明
+```
 
 ## 环境要求
 
@@ -123,8 +178,18 @@ python -m venv .venv
 # Linux/Mac
 source .venv/bin/activate
 
-# 安装依赖
+# 安装主项目依赖
 pip install -r requirements.txt
+
+# 安装URL验证服务依赖（如需要）
+cd url_verification
+pip install -r requirements.txt
+cd ..
+
+# 安装代理转发服务依赖（如需要）
+cd wework_proxy_app
+pip install -r requirements.txt
+cd ..
 ```
 
 ### 2. 企业微信配置
@@ -197,326 +262,265 @@ scoring_rules:
 external_contact_sync:
   enabled: true
   batch_size: 100
-  sync_timeout_seconds: 300
 ```
 
-### 4. 启动服务
-```bash
-# 开发环境
-python -m src.main_ew
+### 4. 运行服务
 
-# 生产环境 (推荐)
+#### 方式一：独立运行各服务
+
+**主招聘机器人服务:**
+```bash
+# 在项目根目录
+python src/main_ew.py
+# 或使用uvicorn
 uvicorn src.main_ew:app --host 0.0.0.0 --port 8502
 ```
 
-### 5. 启动辅助服务
-
-**URL验证服务 (用于企业微信回调URL验证):**
+**URL验证服务（用于测试企业微信回调配置）:**
 ```bash
 cd url_verification
-pip install -r requirements.txt
-cp env.example .env  # 配置TOKEN, ENCODING_AES_KEY, CORP_ID
-python start.py
-# 或直接运行: python app.py
+python app.py
+# 默认运行在 http://0.0.0.0:8502
 ```
 
-**代理转发服务 (用于内网部署):**
+**代理转发服务（用于内网部署）:**
 ```bash
 cd wework_proxy_app
-pip install -r requirements.txt
+# 先配置.env文件中的TARGET_SERVER_URL
 echo "TARGET_SERVER_URL=http://your-internal-server.com" > .env
 python app.py
+# 默认运行在 http://0.0.0.0:8502
 ```
 
-### 6. 后台简历处理
+#### 方式二：生产环境部署
+
+**使用Supervisor管理服务:**
+```ini
+# /etc/supervisor/conf.d/hr_bot.conf
+[program:hr_bot_main]
+command=/path/to/venv/bin/uvicorn src.main_ew:app --host 0.0.0.0 --port 8502
+directory=/path/to/HR_Project_Bot_2.0
+user=your_user
+autostart=true
+autorestart=true
+stdout_logfile=/var/log/hr_bot_main.log
+stderr_logfile=/var/log/hr_bot_main_error.log
+
+[program:hr_bot_proxy]
+command=/path/to/venv/bin/python wework_proxy_app/app.py
+directory=/path/to/HR_Project_Bot_2.0
+user=your_user
+autostart=true
+autorestart=true
+stdout_logfile=/var/log/hr_bot_proxy.log
+stderr_logfile=/var/log/hr_bot_proxy_error.log
+```
+
+**Nginx反向代理配置:**
+```nginx
+server {
+    listen 443 ssl;
+    server_name your_domain.com;
+    
+    # SSL配置...
+    
+    # 主服务路由
+    location /api/v1/wecom/callback {
+        proxy_pass http://localhost:8502/api/v1/wecom/callback;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # 代理转发路由（如果使用代理模式）
+    location /wework-callback/ {
+        proxy_pass http://localhost:8503/wework-callback/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### 5. 测试验证
+
+**测试URL验证服务:**
 ```bash
-# 手动触发简历处理
-python -m src.resume_pipeline.trigger
+# 访问验证端点
+curl "http://localhost:8502/?msg_signature=xxx&timestamp=xxx&nonce=xxx&echostr=xxx"
 ```
 
-## 使用示例
-
-### 查询示例
-**私聊查询:**
-```
-找北京地区的软件工程师，5年以上经验，需要精通Python和Docker
-搜索硕士及以上学历，有华为或腾讯工作经历的算法专家
-给我推荐有PMP证书的项目经理
-找中级工程师及以上，做过电气设计的
-有没有一级建造师？
+**测试代理转发:**
+```bash
+# 测试代理转发功能
+curl "http://localhost:8502/wework-callback/test"
 ```
 
-**群聊查询 (需要@机器人):**
-```
-@机器人 找深圳做嵌入式的，本科以上学历
-@机器人 搜索在恒大干过的土建工程师
-@机器人 需要高级职称的建筑设计师
-```
+**测试主服务:**
+- 在企业微信应用中发送消息给机器人
+- 查看日志确认消息接收和处理
 
-### 交互流程
-1. **发送查询** → 机器人解析并搜索
-2. **接收结果** → Top N候选人列表 + AI摘要
-3. **后续操作:**
-   - `简历 1` → 获取第1位候选人简历
-   - `信息 2` → 查看第2位候选人详情
-   - `联系 3` → 联系第3位候选人
-   - `A` → 查看更多候选人
-   - `B` → 结束查询
+## 使用指南
+
+### 基本查询示例
+```
+# 在企业微信中发送以下消息给机器人：
+
+"找一个本科以上学历的建筑设计师，有恒大工作经验，会CAD和Revit"
+
+"需要一级建造师证书，5年以上施工经验，在深圳工作"
+
+"招聘电气工程师，中级职称及以上，熟悉强电设计"
+```
 
 ### 外部联系人同步
-**手动触发同步:**
 ```
-更新外部联系人
-/sync_contacts
-```
+# 手动触发同步（在企业微信中发送）：
+"更新外部联系人"
 
-**自动同步:**
-- 系统根据配置的CRON表达式自动执行
-- 默认每小时同步一次HR名下的外部联系人
-- 自动匹配手机号并更新数据库
-- 为成功同步的联系人打上标签
+# 同步结果示例：
+本次外部联系人同步完成！
+📊 统计信息：
+- 总获取联系人数：25
+- 待处理联系人数：20  
+- 成功同步并标记：15
+- 同步失败：5
 
-**同步结果通知示例:**
-```
-外部联系人同步完成报告：
-📊 总计获取: 25个外部联系人
-🔍 待处理: 18个 (已排除重复标签)
-✅ 成功同步: 15个
-❌ 同步失败: 3个
-
-失败详情:
-- 张三1234 [ext_123] - DB中未找到匹配手机号
-- 李四5678 [ext_456] - 打标签失败
-- 王五9012 [ext_789] - 外部联系人ID为空
+❌ 以下联系人同步失败：
+1. [张三1234] [woAJ2GCAAAXtWyujaWJHDDGi0mACAAA]
+2. [李四5678] [woAJ2GCAAAXtWyujaWJHDDGi0mACBBB]
 ```
 
-### 辅助服务使用场景
-
-#### URL验证服务使用场景
-**适用情况:**
-- 企业微信应用初次配置回调URL时
-- 需要独立测试企业微信回调验证功能
-- 主应用部署复杂，需要简单的验证服务
-
-**使用步骤:**
-1. 启动URL验证服务: `cd url_verification && python start.py`
-2. 配置企业微信回调URL: `https://yourdomain.com/wework-callback`
-3. 企业微信自动发送验证请求，服务返回解密后的echostr
-4. 验证成功后可切换到主应用的回调处理
-
-#### 代理转发服务使用场景
-**适用情况:**
-- 主应用部署在内网，无法直接接收企业微信回调
-- 需要在公网和内网之间建立安全的代理通道
-- 多个内网服务需要统一的公网入口
-
-**部署架构:**
-```
-企业微信服务器
-    ↓ HTTPS
-公网服务器 (代理转发服务)
-    ↓ HTTP
-内网服务器 (主应用)
-```
-
-**配置示例:**
+### 后台简历处理
 ```bash
-# 公网服务器运行代理转发服务
-cd wework_proxy_app
-echo "TARGET_SERVER_URL=http://192.168.1.100:8502" > .env
-python app.py
+# 手动触发简历处理
+python src/resume_pipeline/trigger.py
 
-# 企业微信回调URL配置
-https://yourdomain.com/wework-callback/api/v1/wecom/callback
-```
-
-## 项目结构
-
-```
-HR_Project_Bot_2.0/
-├── .cursor/rules/          # 项目文档
-│   ├── architecture.mdc    # 架构设计
-│   ├── prd.mdc            # 产品需求
-│   ├── procedure.mdc      # 流程文档
-│   └── ...
-├── src/                   # 源代码
-│   ├── main_ew.py         # 企业微信主应用
-│   ├── enterprise_wechat_service.py  # 企业微信API服务
-│   ├── core_processor_ew.py          # 核心处理器
-│   ├── handlers/          # 业务处理器
-│   ├── models/           # 数据模型
-│   ├── processors/       # 专用处理器
-│   │   └── sync_processor.py  # 外部联系人同步处理器
-│   ├── resume_pipeline/  # 简历处理管道
-│   └── utils/           # 工具模块
-├── url_verification/      # URL验证服务
-│   ├── app.py            # Flask验证应用
-│   ├── start.py          # 启动脚本
-│   ├── crypto_utils.py   # 加密解密工具
-│   ├── requirements.txt  # 依赖列表
-│   └── README.md         # 服务说明
-├── wework_proxy_app/     # 代理转发服务
-│   ├── app.py            # Flask代理应用
-│   ├── requirements.txt  # 依赖列表
-│   └── README.md         # 服务说明
-├── data/                # 待处理简历
-├── processed_resumes/   # 已处理简历
-├── tests/              # 测试用例
-├── config.yaml         # 主配置文件
-├── .env               # 环境变量
-└── requirements.txt   # Python依赖
+# 查看处理日志
+tail -f logs/resume_processing.log
 ```
 
 ## 部署指南
 
-### 开发环境
-1. 使用内网穿透工具 (ngrok/frp) 暴露本地端口
-2. 配置企业微信回调URL指向公网地址
-3. 启动FastAPI应用进行调试
+### 生产环境部署架构
 
-### 生产环境
-
-#### 1. 主应用部署
-1. **服务器配置:**
-   ```bash
-   # 使用Supervisor管理进程
-   sudo apt install supervisor
-   
-   # 配置Nginx反向代理
-   sudo apt install nginx
-   ```
-
-2. **HTTPS配置:**
-   ```nginx
-   server {
-       listen 443 ssl;
-       server_name your_domain.com;
-       
-       ssl_certificate /path/to/cert.pem;
-       ssl_certificate_key /path/to/key.pem;
-       
-       location /api/v1/wecom/callback {
-           proxy_pass http://127.0.0.1:8502;
-           proxy_set_header Host $host;
-           proxy_set_header X-Real-IP $remote_addr;
-       }
-   }
-   ```
-
-3. **进程管理:**
-   ```ini
-   [program:hr_bot]
-   command=/path/to/.venv/bin/uvicorn src.main_ew:app --host 127.0.0.1 --port 8502
-   directory=/path/to/HR_Project_Bot_2.0
-   user=hr_bot
-   autostart=true
-   autorestart=true
-   ```
-
-#### 2. URL验证服务部署
-```bash
-# 部署URL验证服务
-cd url_verification
-cp env.example .env
-# 编辑.env文件配置企业微信参数
-
-# 使用Supervisor管理
-sudo tee /etc/supervisor/conf.d/url_verification.conf << EOF
-[program:url_verification]
-command=/path/to/.venv/bin/python app.py
-directory=/path/to/HR_Project_Bot_2.0/url_verification
-user=hr_bot
-autostart=true
-autorestart=true
-EOF
+```
+[企业微信] → [公网域名+SSL] → [Nginx] → [主服务/代理服务] → [内网服务]
 ```
 
-#### 3. 代理转发服务部署
-```bash
-# 部署代理转发服务
-cd wework_proxy_app
-echo "TARGET_SERVER_URL=http://internal-server:8502" > .env
-echo "FLASK_DEBUG=False" >> .env
+### 推荐部署方案
 
-# 使用Gunicorn运行
-gunicorn -w 4 -b 0.0.0.0:8503 app:app
+1. **单机部署:** 所有服务运行在同一台服务器
+2. **分离部署:** 代理服务部署在公网，主服务部署在内网
+3. **容器化部署:** 使用Docker容器化各个服务
 
-# Nginx配置代理转发
-location /wework-callback/ {
-    proxy_pass http://127.0.0.1:8503/wework-callback/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-```
+### 安全配置
 
-#### 4. 部署架构示例
-```
-[企业微信] → [公网域名+SSL] → [Nginx反向代理] → [代理转发服务] → [内网主应用]
-                                    ↓
-                              [URL验证服务]
-```
+1. **网络安全:**
+   - 配置防火墙规则
+   - 使用HTTPS证书
+   - 限制API访问IP
+
+2. **数据安全:**
+   - MongoDB访问控制
+   - 敏感信息加密存储
+   - 定期备份数据
+
+3. **应用安全:**
+   - 关闭调试模式
+   - 配置日志轮转
+   - 监控异常访问
 
 ## 监控与维护
 
-### 日志监控
-*   应用日志: `logs/app.log`
-*   新证书发现: `logs/new_certificates.log`
-*   错误追踪: 详细的异常堆栈和上下文信息
+### 关键监控指标
+*   **服务可用性:** 各服务的运行状态和响应时间
+*   **消息处理:** 企业微信消息接收和处理成功率
+*   **LLM调用:** API调用次数、成功率、响应时间
+*   **数据库性能:** 查询响应时间、连接数
+*   **简历处理:** 处理成功率、错误分类统计
+*   **外部联系人同步:** 同步成功率、失败原因分析
 
-### 性能监控
-*   LLM API调用次数和耗时
-*   数据库查询性能
-*   并发处理能力
-*   状态缓存命中率
+### 日志管理
+*   **应用日志:** `logs/app.log` - 主要业务逻辑日志
+*   **错误日志:** `logs/error.log` - 错误和异常信息
+*   **访问日志:** Nginx访问日志
+*   **简历处理日志:** 简历处理流程的详细记录
 
-### 定期维护
-*   检查 `data/error/` 和 `data/pending/` 目录
-*   更新证书等级规则 (`src/utils/ranking_data.py`)
-*   优化LLM Prompt提升解析准确率
-*   数据库索引优化
-*   **外部联系人同步维护:**
-    *   检查企业微信"已同步"标签是否存在
-    *   监控同步失败率，及时处理格式不规范的备注
-    *   定期清理过期的外部联系人数据
-    *   验证HR用户权限和客户联系权限
-*   **辅助服务维护:**
-    *   监控URL验证服务的响应时间和成功率
-    *   检查代理转发服务的连接状态和错误日志
-    *   验证企业微信回调URL的可访问性
-    *   定期更新SSL证书和域名配置
+### 维护建议
+*   **定期检查:** 每日检查服务状态和错误日志
+*   **数据备份:** 定期备份MongoDB数据和简历文件
+*   **依赖更新:** 定期更新Python依赖包
+*   **性能优化:** 根据使用情况调整配置参数
+*   **容量规划:** 监控存储空间和数据库大小
 
+### 故障排除
 
-## 贡献指南
+**常见问题:**
 
-1. Fork 项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
+1. **企业微信回调失败**
+   - 检查回调URL配置
+   - 验证Token和AESKey
+   - 查看URL验证服务日志
+
+2. **LLM调用失败**
+   - 检查API Key配置
+   - 验证网络连接
+   - 查看API调用日志
+
+3. **数据库连接问题**
+   - 检查MongoDB服务状态
+   - 验证连接字符串
+   - 查看数据库日志
+
+4. **简历处理失败**
+   - 检查文件权限
+   - 验证OCR组件安装
+   - 查看处理日志
+
+5. **外部联系人同步问题**
+   - 检查企业微信API权限
+   - 验证标签ID配置
+   - 查看同步日志
+
+## 开发指南
+
+### 代码结构
+*   **模块化设计:** 各功能模块独立，便于维护和扩展
+*   **配置驱动:** 通过配置文件管理各种参数
+*   **异步处理:** 使用线程池处理并发请求
+*   **错误处理:** 完善的异常捕获和日志记录
+
+### 扩展开发
+*   **新增查询类型:** 在LLM Prompt中添加新的解析规则
+*   **自定义评分规则:** 修改`config.yaml`中的评分配置
+*   **新增消息类型:** 在handlers中添加新的处理逻辑
+*   **集成其他服务:** 通过API接口集成外部系统
+
+### 测试
+```bash
+# 运行单元测试
+python -m pytest tests/
+
+# 运行特定测试
+python -m pytest tests/test_llm_client.py
+
+# 生成测试覆盖率报告
+python -m pytest --cov=src tests/
+```
 
 ## 许可证
 
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+本项目采用 MIT 许可证。详情请参阅 [LICENSE](LICENSE) 文件。
 
+## 贡献
 
----
+欢迎提交 Issue 和 Pull Request 来改进本项目。
 
-**注意事项:**
-*   确保企业微信应用配置正确
-*   定期备份MongoDB数据
-*   监控LLM API使用量和成本
-*   遵守数据隐私和安全规范
-*   **外部联系人同步注意事项:**
-    *   需要在企业微信后台预先创建"已同步"标签
-    *   HR用户必须具有"客户联系"权限
-    *   外部联系人备注格式需要包含有效手机号
-    *   注意企业微信API调用频率限制
-    *   定期检查同步失败的联系人并手动处理
-*   **辅助服务注意事项:**
-    *   URL验证服务的TOKEN、ENCODING_AES_KEY、CORP_ID必须与企业微信后台配置一致
-    *   代理转发服务的TARGET_SERVER_URL必须指向正确的内网服务地址
-    *   生产环境务必关闭调试模式，使用HTTPS和反向代理
-    *   监控各服务的端口占用和进程状态
-    *   确保防火墙规则允许必要的端口访问 
+## 联系方式
+
+如有问题或建议，请通过以下方式联系：
+- GitHub Issues: [项目Issues页面](https://github.com/lin2000wl/WECOM_HR_PROJECT/issues)
+- 项目仓库: [https://github.com/lin2000wl/WECOM_HR_PROJECT](https://github.com/lin2000wl/WECOM_HR_PROJECT) 
