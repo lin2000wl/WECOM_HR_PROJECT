@@ -77,7 +77,16 @@ ipython_config.py
 # pyenv
 .python-version
 
-# PEP 582; used by PDM, Flit and potentially others
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# pdm
+.pdm.toml
+
+# PEP 582
 __pypackages__/
 
 # Celery stuff
@@ -114,52 +123,51 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# pytype static analysis results
+# pytype static type analyzer
 .pytype/
 
 # Cython debug symbols
 cython_debug/
 
-# VSCode specific
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-*.code-workspace
+# PyCharm
+.idea/
 
-# Custom - 项目特定忽略规则
-*.log
-logs/
-app.log
+# VS Code
+.vscode/
 
-# 敏感数据和处理结果 - 包含个人简历等敏感信息
+# Cursor IDE
+.cursor/
+
+# Project specific
 processed_resumes/
 *.pdf
+logs/
+*.log
 
-# 原始数据目录 - 保留目录结构但忽略具体文件
-data/*
-!data/.gitkeep
-!data/error/
-!data/pending/
-data/error/*
-!data/error/.gitkeep
-data/pending/*
-!data/pending/.gitkeep
+# Data directories (keep structure but ignore content)
+data/*.pdf
+data/error/*.pdf
+data/pending/*.pdf
 
-# 配置文件 - 包含敏感信息
-.env
-config_local.yaml
-
-# IDE和编辑器
-.idea/
-.cursor/
-*.swp
-*.swo
-*~
-
-# 临时文件
+# Temporary files
 *.tmp
 *.temp
 .DS_Store
+Thumbs.db
+
+# MongoDB dumps
+*.bson
+dump/
+
+# Backup files
+*.bak
+*.backup
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
