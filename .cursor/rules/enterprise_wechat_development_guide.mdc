@@ -1,0 +1,289 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+**企业微信智能招聘机器人 - 开发实施指南**
+
+**文档版本：** 1.0
+**目标：** 指导开发者在企业微信自建应用框架下，从零开始或迁移现有功能，构建"智能招聘机器人"。
+
+---
+
+**1. 项目初始化与环境配置**
+
+   **1.1. 企业微信后台配置** <!-- 【状态：待用户根据实际情况操作和确认】 -->
+      *   **创建自建应用：**
+          *   登录企业微信管理后台 -> 应用管理 -> 应用 -> 自建 -> 创建应用。
+          *   配置应用Logo、名称（如"智能招聘机器人"）、可见范围。
+          *   记录 `AgentId` 和 `Secret`。
+      *   **获取企业CorpID：** 我的企业 -> 企业信息 -> CorpID。
+      *   **配置应用回调：**
+          *   在应用详情页，找到"接收消息"设置。
+          *   **URL：** 填写你的公网回调服务器API端点 (例如: `https://your_domain.com/api/v1/wecom/callback`)。
+          *   **Token：** 自定义，用于签名校验。
+          *   **EncodingAESKey：** 随机生成或自定义，用于消息体加解密。
+          *   点击"保存"，企微会向你的URL发送一个GET请求进行验证。
+      *   **配置IP白名单：** <!-- 【状态：用户已确认完成】 -->
+          *   在应用详情页，找到"开发者接口"或类似设置，配置可信IP白名单，允许服务器调用企业微信API。
+
+   **1.2. 本地开发环境**
+      *   **Python版本：** 3.8+ <!-- 【状态：已满足】 -->
+      *   **虚拟环境：** 推荐使用 `venv` 或 `conda`。 <!-- 【状态：已满足】 -->
+      *   **核心依赖安装 (`requirements.txt`)：** <!-- 【状态：部分已满足，待确认完整性】 -->
+          ```txt
+          fastapi
+          uvicorn[standard]
+          httpx  # 用于调用企微API
+          pycryptodome # WXBizMsgCrypt 依赖 (如果使用官方或兼容的加解密库)
+          xmltodict # XML <-> Dict 转换 (如果回调消息格式为XML)
+          python-dotenv # 管理环境变量
+          # --- 项目原有依赖 ---
+          openai
+          pymongo
+          cachetools
+          PyYAML
+          # ... (如 PyPDF2, unstructured 等简历处理相关库)
+          ```
+          安装：`pip install -r requirements.txt`
+
+   **1.3. 配置文件 (`.env`)** <!-- 【状态：用户已按要求配置】 -->
+      ```env
+      # 企业微信配置
+      WECOM_CORP_ID="your_corp_id"
+      WECOM_AGENT_ID="your_agent_id"
+      WECOM_APP_SECRET="your_app_secret"
+      WECOM_CALLBACK_TOKEN="your_callback_token" # 与后台配置一致
+      WECOM_CALLBACK_AES_KEY="your_callback_aes_key" # 与后台配置一致
+
+      # LLM 配置
+      DEEPSEEK_API_KEY="your_llm_api_key"
+      DEEPSEEK_API_BASE="your_llm_api_base_url" # (如果不是默认)
+
+      # MongoDB 配置
+      MONGO_URI="your_mongodb_connection_string"
+      MONGO_DATABASE="your_database_name"
+      
+      # 应用配置
+      BOT_NAME="智能招聘机器人" # 示例
+      AUTHORIZED_USER_IDS_EW="userid1,userid2" # 授权使用机器人的企微UserID列表，逗号分隔
+      LOG_LEVEL="INFO"
+      # ... 其他配置
+      ```
+
+   **1.4. `config_ew.py` (示例)** <!-- 【状态：已创建并实现加载逻辑】 -->
+      ```python
+      import os
+      from dotenv import load_dotenv
+
+      load_dotenv()
+
+      # 企业微信配置
+      WECOM_CORP_ID = os.getenv("WECOM_CORP_ID")
+      WECOM_AGENT_ID = os.getenv("WECOM_AGENT_ID")
+      WECOM_APP_SECRET = os.getenv("WECOM_APP_SECRET")
+      WECOM_CALLBACK_TOKEN = os.getenv("WECOM_CALLBACK_TOKEN")
+      WECOM_CALLBACK_AES_KEY = os.getenv("WECOM_CALLBACK_AES_KEY")
+      
+      # 应用配置
+      BOT_NAME = os.getenv("BOT_NAME", "智能招聘机器人")
+
+      # ... 其他配置加载 ...
+
+      # 授权用户列表 (从字符串转换为列表)
+      _authorized_user_ids_str = os.getenv("AUTHORIZED_USER_IDS_EW", "")
+      AUTHORIZED_USER_IDS = [uid.strip() for uid in _authorized_user_ids_str.split(',') if uid.strip()]
+
+      print(f"企业微信配置已加载:\n  Corp ID: {WECOM_CORP_ID}\n  Agent ID: {WECOM_AGENT_ID}") # 临时用于调试
+
+      # 校验关键配置是否存在
+      if not all([WECOM_CORP_ID, WECOM_AGENT_ID, WECOM_APP_SECRET, WECOM_CALLBACK_TOKEN, WECOM_CALLBACK_AES_KEY]):
+          raise ValueError("企业微信相关核心配置缺失，请检查 .env 文件。")
+      ```
+
+**2. 企业微信API服务层 (`src/enterprise_wechat_service.py`)**
+
+   此模块封装所有对企业微信服务端API的调用。
+
+   **2.1. `access_token` 管理** <!-- 【状态：已完成并测试】 -->
+      *   实现 `EnterpriseWeChatService` 类 (已实现为单例模式)。
+      *   维护一个实例变量用于缓存 `access_token` 和其过期时间。
+      *   提供 `async def get_access_token()` 方法：
+          *   检查缓存的 `token` 是否有效（未过期）。
+          *   若无效，异步调用 `https://qyapi.weixin.qq.com/cgi-bin/gettoken` API获取新 `token`。
+          *   使用 `httpx.AsyncClient`。
+          *   更新缓存。
+          *   考虑并发场景下的锁机制，防止重复获取 (单例模式的 `_lock` 已处理此问题)。
+
+   **2.2. 发送消息方法** <!-- 【状态：已完成并测试】 -->
+      *   `async def send_text_message(self, content: str, user_ids: list[str] = None, party_ids: list[str] = None, tag_ids: list[str] = None)`:
+          *   构建请求体。
+          *   异步调用 `POST https://qyapi.weixin.qq.com/cgi-bin/message/send` API。
+          *   处理API响应，记录日志。
+      *   `async def upload_temporary_media(self, file_path: str, media_type: str = "file") -> str | None`:
+          *   异步调用 `POST https://qyapi.weixin.qq.com/cgi-bin/media/upload` API。
+          *   返回 `media_id` 或 `None`。
+      *   `async def send_file_message(self, media_id: str, user_ids: list[str] = None, party_ids: list[str] = None, tag_ids: list[str] = None)`:
+          *   构建请求体。
+          *   异步调用 `POST https://qyapi.weixin.qq.com/cgi-bin/message/send` API。
+
+   **2.3. (可选) 其他API封装**
+      *   获取部门列表、成员信息等（如果业务需要）。
+
+---
+
+**3. 回调服务器 (`src/main_ew.py` 或 `app_ew.py`)**
+
+   使用 FastAPI 搭建。
+
+   **3.1. 引入依赖和配置** <!-- 【状态：待实现】-->
+      ```python
+      from fastapi import FastAPI, Request, HTTPException, Query
+      # import xml.etree.ElementTree as ET # 或使用 xmltodict
+      # from WXBizMsgCrypt import WXBizMsgCrypt # 官方或第三方加解密库
+      from src import config_ew
+      from src.enterprise_wechat_service import EnterpriseWeChatService
+      # from src.core_processor import CoreProcessor (后续集成)
+      import logging
+      import asyncio # 用于创建后台任务
+
+      app = FastAPI()
+      logger = logging.getLogger(__name__) # 配置你的日志
+
+      # 初始化企微服务和核心处理器
+      # service_instance = EnterpriseWeChatService() # 获取单例
+      # core_processor = CoreProcessor(wecom_service=service_instance) # 传入企微服务实例
+      ```
+
+   **3.2. URL验证端点 (GET)** <!-- 【状态：待实现与测试】 -->
+      ```python
+      @app.get("/api/v1/wecom/callback") # 确保路径与企微后台配置一致
+      async def verify_wecom_callback(
+          msg_signature: str = Query(..., alias="msg_signature"),
+          timestamp: str = Query(..., alias="timestamp"),
+          nonce: str = Query(..., alias="nonce"),
+          echostr: str = Query(..., alias="echostr")
+      ):
+          # try:
+          #     wxcpt = WXBizMsgCrypt(config_ew.WECOM_CALLBACK_TOKEN, config_ew.WECOM_CALLBACK_AES_KEY, config_ew.WECOM_CORP_ID)
+          #     ret, s_echo_str = wxcpt.VerifyURL(msg_signature, timestamp, nonce, echostr)
+          #     if ret != 0:
+          #         logger.error(f"企业微信回调URL验证失败，错误码: {ret}")
+          #         raise HTTPException(status_code=400, detail="URL验证失败")
+          #     return int(s_echo_str.decode('utf-8')) # 或直接返回 s_echo_str 字符串
+          # except Exception as e:
+          #     logger.exception("企业微信回调URL验证异常")
+          #     raise HTTPException(status_code=500, detail="服务器内部错误")
+          pass # TODO: 实现
+      ```
+
+   **3.3. 消息接收端点 (POST)** <!-- 【状态：待实现与测试】 -->
+      ```python
+      @app.post("/api/v1/wecom/callback") # 确保路径与企微后台配置一致
+      async def receive_wecom_message(
+          request: Request,
+          msg_signature: str = Query(..., alias="msg_signature"),
+          timestamp: str = Query(..., alias="timestamp"),
+          nonce: str = Query(..., alias="nonce")
+      ):
+          # try:
+          #     body = await request.body()
+          #     encrypted_xml_msg = body.decode('utf-8')
+
+          #     wxcpt = WXBizMsgCrypt(config_ew.WECOM_CALLBACK_TOKEN, config_ew.WECOM_CALLBACK_AES_KEY, config_ew.WECOM_CORP_ID)
+          #     ret, decrypted_xml_msg_bytes = wxcpt.DecryptMsg(encrypted_xml_msg, msg_signature, timestamp, nonce)
+
+          #     if ret != 0:
+          #         logger.error(f"企业微信消息解密失败，错误码: {ret}, 密文: {encrypted_xml_msg}")
+          #         return "" # 或根据企微要求返回特定错误，但通常是空字符串
+
+          #     decrypted_xml_msg = decrypted_xml_msg_bytes.decode('utf-8')
+          #     logger.info(f"收到解密后的消息: {decrypted_xml_msg}")
+
+          #     # 1. 解析XML消息 (使用 xmltodict 或 ET)
+          #     #    parsed_msg = xmltodict.parse(decrypted_xml_msg)['xml']
+          #     #    msg_type = parsed_msg.get('MsgType')
+          #     #    from_user_id = parsed_msg.get('FromUserName') # UserID
+          #     #    agent_id = parsed_msg.get('AgentID')
+          #     #    content = parsed_msg.get('Content') # for text messages
+          #     #    media_id = parsed_msg.get('MediaId') # for media messages
+
+          #     # 2. TODO: 将解析后的消息 (parsed_msg) 传递给 CoreProcessor 进行异步处理
+          #     #    asyncio.create_task(core_processor.handle_wecom_message(parsed_msg))
+
+          #     return "" # 立即回复企微服务器，表示成功接收
+          # except Exception as e:
+          #     logger.exception(f"处理企业微信消息异常")
+          #     return "" # 即使出错，也回复空字符串，避免企微重试
+          pass # TODO: 实现
+      ```
+
+---
+
+**4. 核心业务逻辑适配 (`src/core_processor_ew.py` 或适配原 `core_processor.py`, 及 `handlers/`)** <!-- 【状态：已完成】 -->
+
+   **4.1. 消息输入适配**
+      *   `CoreProcessor` 的入口方法（如 `handle_wecom_message`）需要接收从回调服务器解析出的消息字典/对象。
+      *   提取 `FromUserName` (即 `UserID`) 用于用户识别和授权。
+      *   提取 `MsgType`, `Content`, `MediaId` 等用于后续逻辑判断。
+
+   **4.2. 用户授权 (`AuthHandlerEw`)** <!-- 【状态：核心逻辑已实现】 -->
+      *   修改原有的 `AuthHandler`，使其基于 `config_ew.AUTHORIZED_USER_IDS` (企微 `UserID` 列表) 进行校验。
+
+   **4.3. 消息发送**
+      *   所有原先通过 `wcferry` 发送消息的地方，现在都需要调用 `EnterpriseWeChatService` 实例的相应方法 (如 `send_text_message`, `send_file_message`)。
+      *   `CoreProcessor` 初始化时应接收一个 `EnterpriseWeChatService` 的实例。
+
+   **4.4. 状态管理 (`StateManager`)**
+      *   缓存的 `key` 应基于 `FromUserName` (`UserID`) 或其他企微上下文唯一标识符。逻辑本身可复用。
+
+   **4.5. 文件处理（简历发送/接收）**
+      *   **发送简历：**
+          1.  `CoreProcessor` 决定发送简历。
+          2.  调用 `wecom_service.upload_temporary_media(resume_file_path)` 获取 `media_id`。
+          3.  调用 `wecom_service.send_file_message(media_id, user_ids=[target_user_id])`。
+      *   **接收文件（如果需要从用户处接收简历）：**
+          1.  回调服务器解析到文件消息 (`MsgType == 'file'`)，获取 `MediaId`。
+          2.  `CoreProcessor` 调用企微API下载文件：`GET https://qyapi.weixin.qq.com/cgi-bin/media/get?access_token=ACCESS_TOKEN&media_id=MEDIA_ID` (需在 `EnterpriseWeChatService` 中实现此下载方法)。
+          3.  将下载的文件送入 `ResumePipeline`。
+
+---
+
+**5. 运行与部署** <!-- 【状态：待开始】 -->
+
+   **5.1. 本地运行 (开发)**
+      *   使用 `uvicorn`：
+          ```bash
+          uvicorn src.main_ew:app --host 0.0.0.0 --port 8502 --reload 
+          # 假设 FastAPI app 实例在 src/main_ew.py 中名为 app
+          ```
+      *   需要使用内网穿透工具 (如 ngrok, frp) 将本地 `8502` 端口暴露到公网，并将公网地址配置到企微应用回调URL。
+
+   **5.2. 服务器部署**
+      *   将代码部署到具有公网IP的服务器。
+      *   使用 Gunicorn + Uvicorn worker (或 Hypercorn) 运行 FastAPI 应用。
+      *   建议使用 Supervisor 或 systemd 管理进程。
+      *   配置Nginx或Caddy等作为反向代理，处理HTTPS。
+
+---
+
+**6. 测试要点** <!-- 【状态：部分已通过 (API Service)，部分待进行】 -->
+
+   *   **回调URL验证：** 确保企微后台能成功验证你的回调URL。
+   *   **消息加解密：** 发送测试消息给应用，检查回调服务器是否能正确解密并记录日志。
+   *   **`access_token` 获取与刷新：** <!-- 【状态：已测试通过】 --> 监控 `access_token` 的获取和自动刷新逻辑。
+   *   **文本消息处理：** 测试完整的查询->LLM->DB->结果返回流程。
+   *   **文件消息处理（发送简历）：** <!-- 【状态：API层面已测试通过】 --> 测试简历上传到临时素材并发回给用户的流程。
+   *   **授权校验：** 测试授权用户和非授权用户的访问情况。
+   *   **并发与状态管理：** （如果已实现）模拟多用户并发请求，检查状态隔离和TTL。
+   *   **错误处理：** 模拟API调用失败、LLM解析错误等场景，检查系统的容错和日志记录。
+
+---
+
+本开发实施指南提供了将智能招聘机器人项目与企业微信集成的关键步骤和代码组织建议。开发过程中请密切参考企业微信官方开发者文档以获取最详细的API说明和最新的更新。
+
+
+
+
+
+

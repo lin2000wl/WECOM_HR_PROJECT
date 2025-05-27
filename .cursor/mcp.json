@@ -1,0 +1,32 @@
+{
+    "mcpServers": {
+      "server-sequential-thinking": {
+        "command": "cmd",
+        "args": [
+          "/c",
+          "npx",
+          "-y",
+          "@modelcontextprotocol/server-sequential-thinking"
+        ]
+      },
+      "browser-tools": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@agentdeskai/browser-tools-mcp@1.2.0"
+      ],
+      "enabled": true
+    },
+    "@microsoft/playwright-mcp": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@playwright/mcp@latest"
+      ]
+    }
+    }
+  }

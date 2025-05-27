@@ -1,0 +1,115 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# 模块2：核心转发逻辑实现 (已更新)
+
+## 模块功能说明
+本模块在 `app.py` 中实现了核心的 HTTP 请求转发代理功能。它使用 Flask 接收来自客户端 `/wework-callback/...` 路径的请求，并将这些请求转发到在 `.env` 文件中配置的 `TARGET_SERVER_URL` (例如 `http://9bn8of823990.vicp.fun`)，然后将目标服务器的响应返回给原始客户端。
+
+## 主要实现 (`app.py`)
+
+```python
+import os
+import requests
+from flask import Flask, request, Response
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+app = Flask(__name__)
+
+TARGET_SERVER_URL = os.getenv("TARGET_SERVER_URL")
+
+if not TARGET_SERVER_URL:
+    raise ValueError("TARGET_SERVER_URL environment variable not set. Please define it in your .env file.")
+
+# Hop-by-hop headers that should not be blindly forwarded
+HOP_BY_HOP_HEADERS = [
+    'Connection', 'Keep-Alive', 'Proxy-Authenticate', 'Proxy-Authorization',
+    'TE', 'Trailers', 'Transfer-Encoding', 'Upgrade',
+]
+
+@app.route('/wework-callback', strict_slashes=False, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+@app.route('/wework-callback/<path:path>', strict_slashes=False, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+def proxy(path=''):
+    if not TARGET_SERVER_URL:
+        return "Proxy target not configured.", 500
+
+    # Construct target URL by removing '/wework-callback' prefix
+    if path:
+        # Forward sub-paths under /wework-callback to TARGET_SERVER_URL/sub-path
+        target_url = f"{TARGET_SERVER_URL.rstrip('/')}/{path.lstrip('/')}"
+    else:
+        # For root '/wework-callback', forward to base TARGET_SERVER_URL
+        target_url = TARGET_SERVER_URL.rstrip('/')  
+    if request.query_string:
+        target_url += '?' + request.query_string.decode('utf-8')
+
+    outgoing_headers = {key: value for key, value in request.headers 
+                        if key.lower() not in ['host', 'content-length'] + [h.lower() for h in HOP_BY_HOP_HEADERS]}
+
+    try:
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers=outgoing_headers,
+            data=request.get_data(),
+            allow_redirects=False,
+            timeout=30
+        )
+
+        response_headers = []
+        for key, value in resp.headers.items():
+            if key.lower() not in [h.lower() for h in HOP_BY_HOP_HEADERS]:
+                response_headers.append((key, value))
+        
+        flask_response = Response(resp.content, status=resp.status_code, headers=response_headers)
+        return flask_response
+
+    except requests.exceptions.Timeout:
+        app.logger.warning(f"Timeout connecting to {target_url}")
+        return "The request to the target server timed out.", 504
+    except requests.exceptions.ConnectionError as e:
+        app.logger.error(f"Connection error to {target_url}: {e}")
+        return "Could not connect to the target server.", 502
+    except Exception as e:
+        app.logger.error(f"An unexpected error occurred while proxying request to {target_url}: {e}")
+        return "An unexpected error occurred while proxying the request.", 500
+
+if __name__ == '__main__':
+    port = int(os.getenv("FLASK_RUN_PORT", 8502))
+    debug_mode = os.getenv("FLASK_DEBUG", "False").lower() in ('true', '1', 't')
+    app.run(host='0.0.0.0', port=port, debug=debug_mode)
+```
+
+## 关键点
+- **监听路径更新**: Flask 应用现在监听 `/wework-callback`，`/wework-callback/` 及 `/wework-callback/<path:path>`。
+- **目标服务器配置**: `TARGET_SERVER_URL` 需在 `.env` 文件中配置为您的目标服务器地址 (例如 `http://9bn8of823990.vicp.fun`)。
+- 其他如环境变量加载、头部处理、请求转发、响应返回、错误处理等机制保持不变。
+
+## 如何运行和测试
+1.  **确保 `wework_proxy_app/.env` 文件已更新**，其中 `TARGET_SERVER_URL` 设置为 `http://9bn8of823990.vicp.fun`。
+2.  确保已在虚拟环境中安装了 `requirements.txt` 中的所有依赖。
+3.  在 `wework_proxy_app` 目录下，通过终端运行：
+    ```bash
+    python app.py
+    ```
+    应用将默认在 `http://0.0.0.0:8502` 上启动 (端口可通过 `FLASK_RUN_PORT` 环境变量修改，您之前已将其默认值改为8502)。
+4.  **测试**: 
+    *   您需要配置您的反向代理 (例如 Nginx) 将来自 `https://designfamily.cn/wework-callback/...` 的请求转发到 `http://localhost:8502/wework-callback/...` (假设 Flask 应用与反向代理在同一台机器上运行)。
+    *   然后，通过访问 `https://designfamily.cn/wework-callback/some/test/path?query=true` 来测试。
+    *   请求应该被转发到 `http://9bn8of823990.vicp.fun/some/test/path?query=true`，并且该服务器的响应会通过代理返回给您。
+    *   您可以观察 Flask 应用的控制台输出来获取调试信息。
+
+## 待验证
+- 用户已正确更新 `.env` 文件中的 `TARGET_SERVER_URL`。
+- 用户已重新启动 Flask 应用。
+- 新的路由 `/wework-callback` 是否按预期工作。
+- 请求是否成功转发到 `http://9bn8of823990.vicp.fun`。
+- 目标服务器的响应是否正确返回给客户端。
+
+
+

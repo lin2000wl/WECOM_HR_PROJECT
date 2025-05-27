@@ -1,0 +1,536 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# 架构设计指南：微信智能招聘机器人
+
+## 1. 引言
+
+本文档旨在描述微信智能招聘机器人的系统架构设计。它定义了系统的主要组件、它们各自的职责以及它们之间的交互方式，为项目的开发、部署和维护提供指导。本设计基于 PRD、流程文档和技术栈文档中确立的需求和决策。
+
+## 2. 设计原则
+
+*   **模块化 (Modularity):** 系统应划分为高内聚、低耦合的模块，每个模块负责特定的功能。这便于开发、测试、维护和未来的扩展。
+*   **关注点分离 (Separation of Concerns):** 将不同的功能逻辑（如微信交互、业务逻辑、数据持久化、LLM 调用）分离到不同的组件中。
+*   **可配置性 (Configurability):** 将易变的信息（如 API Keys、数据库连接、授权用户、文件路径、消息模板、TTL 时间）与代码分离，通过配置文件管理。
+*   **健壮性 (Robustness):** 设计应考虑各种异常情况（网络错误、API 异常、数据错误、文件操作失败、并发问题），并包含健壮的错误处理和日志记录机制。
+*   **异步处理:** 对于耗时操作（如 LLM 调用、后台简历处理），考虑使用异步处理或后台任务，避免阻塞主交互流程。
+*   **并发处理:** 核心交互流程应能并发处理多个用户的请求，避免阻塞。
+*   **状态管理:** 用户交互状态应被有效管理，并具备超时自动清理机制。
+
+## 3. 高层架构
+
+系统可以大致分为以下几个核心层和主要模块：
+
+```mermaid
+graph TD
+    subgraph "外部依赖/环境"
+        EnterpriseWeChat[企业微信客户端/服务端]
+        User[招聘人员 (用户)]
+        Candidate[候选人]
+        FileSystem[文件系统 (data/, processed/, error/, pending/)]
+        LLM_API[DeepSeek LLM API]
+    end
+
+    subgraph "机器人应用系统"
+        EWInterface[A. 企业微信交互层 (FastAPI)]
+        Core[B. 核心处理与业务逻辑层]
+        Data[C. 数据持久化层 (MongoDB)]
+        Background[D. 后台简历处理管道]
+        Config[E. 配置与日志]
+        Concurrency[F. 并发与状态管理]
+    end
+
+    User -- 企业微信消息 --> EnterpriseWeChat
+    EnterpriseWeChat -- HTTP回调 --> EWInterface
+    EWInterface -- 消息/事件 --> Core
+    Core -- 任务 --> Concurrency
+    Concurrency -- 处理结果 --> Core # 简化表示，实际是线程完成
+    Core -- 指令/数据 --> EWInterface
+    EWInterface -- 企业微信API调用 --> EnterpriseWeChat
+    EnterpriseWeChat -- 消息 --> User
+    EnterpriseWeChat -- 消息 --> Candidate
+
+    Concurrency -- 调用处理 --> Core # 实际是线程调用核心业务逻辑
+    Core -- 查询/写入 --> Data
+    Core -- 调用 --> LLM_API
+    Core -- 读/写文件 --> FileSystem # (主要通过后台管道, 或按需发送简历)
+    Core -- 状态读/写 --> Concurrency # 状态管理
+
+    Background -- 扫描 --> FileSystem
+    Background -- 调用 --> LLM_API
+    Background -- 查询/写入 --> Data
+    Background -- 移动/重命名 --> FileSystem
+
+    Core -- 读取配置 --> Config
+    Background -- 读取配置 --> Config
+    EWInterface -- 读取配置 --> Config
+    Data -- 读取配置 --> Config
+    Concurrency -- 读取配置 --> Config # 如 TTL 时间
+
+    %% 交互细节
+    Core -->|发送候选人列表/摘要/提示| EWInterface
+    Core -->|按需发送简历文件 (通过media_id)| EWInterface
+    Core -->|发送详细信息| EWInterface
+    Core -->|发送沟通消息| EWInterface
+
+```
+
+*   **A. 企业微信交互层 (`main_ew.py`, `enterprise_wechat_service.py`):** 负责处理企业微信回调、消息加解密、`access_token` 管理，并封装对企业微信API的调用（如发送消息、上传文件）。
+*   **B. 核心处理与业务逻辑层:** 系统的大脑，负责消息路由、权限校验、意图识别、协调 `handlers` 处理具体业务逻辑（如查询、选择）、调用 LLM、与数据库交互、格式化响应等。
+*   **C. 数据持久化层 (MongoDB):** 负责与 MongoDB 数据库交互，提供候选人数据的增删改查接口。
+*   **D. 后台简历处理管道:** 负责离线的简历处理流程。
+*   **E. 配置与日志:** 提供统一的配置加载和日志记录服务。
+*   **F. 并发与状态管理层:**
+    *   **并发控制器 (如 `ThreadPoolExecutor`):** 管理工作线程池，分发用户请求给独立线程处理。
+    *   **状态管理器 (`StateManager`):** 使用带 TTL 的缓存 (`cachetools.TTLCache`) 存储和管理用户会话状态（上下文、候选人映射等），处理状态的增删改查和超时。
+
+## 4. 组件详解
+
+### 4.1 企业微信交互层 ( `main_ew.py`, `enterprise_wechat_service.py` )
+
+*   **职责:**
+    *   **回调处理 (`main_ew.py` using FastAPI):**
+        *   提供公网可访问的 HTTP 端点用于接收企业微信的 URL 验证 (GET) 和消息回调 (POST)。
+        *   使用 `WXBizMsgCrypt` (腾讯官方或社区提供的库) 进行签名校验、消息解密和响应加密。
+        *   将解密后的消息体 (通常是 XML，需转换为字典) 传递给核心处理层。
+        *   立即回复企业微信服务器以确认接收成功 (通常是空字符串或 "success")。
+    *   **企业微信API服务 (`enterprise_wechat_service.py`):**
+        *   封装 `access_token` 的获取与缓存逻辑 (包括过期自动刷新)。
+        *   提供发送应用消息的接口 (如文本 `send_text_message`, 文件 `send_file_message` 等)。
+        *   提供上传临时素材的接口 (`upload_temporary_media`)，用于发送文件。
+        *   (可选) 封装其他需要的企业微信 API，如获取用户信息、部门信息等。
+    *   处理企业微信 API 调用时的错误和重试。
+*   **技术:** FastAPI, Uvicorn, `httpx` (用于调用企微 API), `pycryptodome` (WXBizMsgCrypt 依赖), `xmltodict` (XML<->Dict转换)。
+
+### 4.2 核心处理与业务逻辑层 ( `core_processor.py`, `handlers/` )
+
+*   **职责:**
+    *   **消息路由 (`message_router`):** 接收来自交互层的消息，进行初步判断（私聊/群聊@、是否文本、是否自身）、调用 **认证/授权模块 (`auth_handler`)** 校验权限，判断是新查询还是对现有状态的回复（通过查询 **状态管理器**），并将任务分发给 **并发控制器**。
+    *   **认证/授权模块 (`auth_handler`):** 检查消息发送者是否在授权用户列表中。
+    *   **意图识别处理器 (`intent_handler`):** (处理新查询任务时调用) 判断授权用户的消息是否为招聘查询意图。
+    *   **查询处理协调器 (`query_handler`):** (处理新查询任务时调用)
+        *   调用 **LLM 服务客户端 (`llm_client`)** 进行指令解析 (LLM Prompt 已更新，支持提取 `education_levels` 列表, `previous_companies` 列表，并优化了歧义处理能力)。
+        *   校验和转换 LLM 返回的结构化查询条件 (`parsed_data`)。
+        *   **[修改]** 调用 `_build_mongo_query` 构建 MongoDB 查询 (`mongo_query`)：
+            *   学历: 使用 `$in` 操作符匹配 `parsed_data['education_levels']` 列表，并自动扩展 "本科"/"学士" 同义词，查询 `query_tags.degrees` 字段。
+            *   证书: 对 `parsed_data['certifications']` 中的每个证书，使用 `$regex` 对 `query_tags.certifications` 数组进行模糊匹配。
+            *   职位/证书歧义: 如果 `parsed_data['position']` 被提供，则使用 `$or` 条件同时模糊匹配 `query_tags.positions` 和 `query_tags.certifications`。
+            *   公司经验: 如果 `parsed_data['previous_companies']` 被提供，使用 `$regex` 在 `extracted_info.experience.company` 字段中进行模糊匹配。
+            *   其他字段（经验、技能、地点）按原逻辑处理。
+        *   调用 **数据库接口 (`db_interface`)** 检索一个初步匹配的候选人池 (数量由配置 `scoring_rules.initial_candidate_pool_size` 决定)。
+        *   调用评分工具 (`src/utils/scoring_utils.py`)，根据配置文件 (`config.yaml`) 中的 `scoring_rules` 对候选人池进行评分计算。
+        *   根据计算出的分数对候选人池进行降序排序。
+        *   从排序后的列表中选择 Top N (例如 5) 个候选人。
+        *   调用 **LLM 服务客户端 (`llm_client`)** 为 **Top N** 候选人生成简要对比分析摘要。
+        *   格式化包含 **Top N** 候选人列表、摘要和操作指令的消息。
+        *   调用 **状态管理器 (`state_manager`)** 缓存查询上下文（条件、**Top N** 候选人信息、简历路径、序号映射、**下一页偏移量**、**是否有更多标记**），设置 TTL。
+        *   触发 **企业微信交互层** 发送结果消息。
+    *   **选择处理协调器 (`selection_handler`):** (处理等待回复的任务时调用)
+        *   解析用户回复指令 (`简历 X`, `信息 X`, `联系 X`, `A`, `B`)。
+        *   调用 **状态管理器 (`state_manager`)** 检索或更新缓存信息。
+        *   根据指令执行相应操作：
+            *   `简历 X`: 调用 `enterprise_wechat_service` 上传文件获取 `media_id`，然后发送文件消息，刷新 TTL。
+            *   `信息 X`: 格式化信息，调用 `enterprise_wechat_service` 发送文本，刷新 TTL。
+            *   `联系 X`: 调用 `enterprise_wechat_service` 联系候选人，发送确认，清除缓存。
+            *   `A`: 调用 `db_interface` 查询下一页，如果找到，调用 `query_handler` 的部分逻辑（生成摘要、格式化、发送消息、更新缓存并刷新 TTL），否则发送提示并清除缓存。
+            *   `B`: 发送确认，清除缓存。
+        *   处理无效指令或超时（由状态管理器触发）。
+    *   **LLM 服务客户端 (`llm_client`):** 封装对 DeepSeek API 的调用。**查询解析 Prompt (`parse_query_intent`) 已更新**，以支持 `education_levels` 列表（含范围处理）和 `previous_companies` 提取。
+*   **技术:** Python Core Logic, `threading`, `openai` (in `llm_client`), `pymongo` (in `db_interface`), `cachetools` (in `state_manager`)
+
+### 4.3 数据持久化层 ( `db_interface.py`, `models/` )
+
+*   **职责:**
+    *   建立与 MongoDB 的连接。
+    *   提供查询候选人的接口（支持复杂条件和分页）。
+    *   提供插入或更新候选人记录（Upsert）的接口。
+    *   (可选) 定义 `Candidate` 数据模型。
+*   **技术:** `pymongo`
+
+### 4.4 后台简历处理管道 ( `resume_pipeline/` )
+
+*   **职责:** (基本不变) 独立的离线简历处理流程。
+    *   触发器 (`trigger`)。
+    *   文件扫描器 (`scanner`)。
+    *   文本提取器 (`text_extractor`)。
+    *   OCR 模块 (`ocr_processor`)。
+    *   LLM 解析器 (`resume_parser`)。
+    *   校验与标准化器 (`validator_standardizer`)。
+    *   文件管理器 (`file_manager`)。
+    *   数据库更新器 (`db_updater`)。
+*   **技术:** Python Core Logic, PDF/OCR libs, `openai`, `pymongo`, Scheduling lib (optional)
+
+### 4.5 配置与日志 ( `config.py`, `config_ew.py`, `logger.py` )
+
+*   **职责:**
+    *   **配置模块 (`config`, `config_ew`):** 加载 YAML 或 `.env` 文件，提供全局配置访问（包括 DB 连接、LLM API Keys、授权用户列表 `AUTHORIZED_USER_IDS`/`AUTHORIZED_USER_IDS_EW`、文件路径、TTL 时间、**企业微信CorpID, AgentID, Secret, Token, AESKey** 等）。
+    *   **日志模块 (`logger`):** 初始化 `logging`，提供标准化的日志记录接口，支持多线程环境下的日志记录。
+*   **技术:** `PyYAML`/`python-dotenv`, `logging`
+
+### 4.6 [v1.1 新增] 并发与状态管理层 ( `core_processor.py` 中实现部分逻辑, `state_manager.py` )
+
+*   **职责:**
+    *   **并发控制器 (在 `core_processor.py`):** 初始化和管理 `ThreadPoolExecutor`，将接收到的有效用户请求（新查询或回复）包装成任务提交给线程池执行。
+    *   **状态管理器 (`StateManager` in `state_manager.py`):**
+        *   初始化 `cachetools.TTLCache`，设置从配置读取的 TTL 时间。
+        *   提供线程安全的接口用于添加、获取、更新和删除用户状态 (使用 wxid 或 groupid+wxid 作为 key)。
+        *   缓存内容包括：MongoDB 查询条件 (`query_criteria`)、LLM 解析的原始查询条件 (`parsed_query_data`)、分页偏移量 (`query_offset`)、是否有更多标记 (`has_more`)、当前批次 **Top N** 候选人的详细信息 (`extracted_info`)、简历路径 (`resume_pdf_path`)、序号到 wxid/信息的映射等。
+        *   TTL 机制自动处理过期状态的清理。
+*   **技术:** `threading.ThreadPoolExecutor`, `cachetools.TTLCache`
+
+## 5. 数据模型 (MongoDB - Candidate Collection)
+
+(确保包含以下关键字段，特别是用于查询的)
+
+```json
+{
+  "_id": "<ObjectId>",
+  "name": "...",
+  "phone": "...",
+  "email": "...",
+  "wxid": "...",
+  "resume_pdf_path": "...", // 标准化后的简历文件路径
+  "extracted_info": { // 从简历提取的结构化信息
+    "summary": "...",
+    "current_location": "...",
+    "experience": [ // 用于公司经验查询
+      {
+        "company": "...", // <- 用于 previous_companies 查询 ($regex)
+        "title": "...",
+        // ...
+      }
+    ],
+    "education": [
+      {
+        "school": "...",
+        "degree": "...", // 原始学位信息
+        // ...
+      }
+    ],
+    "skills": [...],
+    "certifications": [...]
+  },
+  "query_tags": { // 用于快速检索的标签
+    "positions": [...], // <- 用于职位查询 ($regex, $or)
+    "min_experience_years": ..., // <- 用于经验范围查询 ($gte, $lte)
+    "skills_normalized": [...], // <- 用于技能查询 ($all)
+    "location": "...", // <- 用于地点查询 ($regex)
+    "certifications": [...], // <- 用于证书查询 ($regex, $or)
+    "degrees": [...] // <- 用于学历查询 ($in, 包含 "本科", "学士", "硕士", "博士" 等)
+  },
+  "last_processed_time": "<ISODate>",
+  "source_file_original_name": "..."
+}
+```
+
+## 6. 交互流程 (Sequence Diagrams - Conceptual)
+
+### 6.1 用户查询与交互流程 (v1.1 - Updated Query Logic - 企业微信版)
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant EnterpriseWeChat as 企业微信客户端/服务端
+    participant EWInterface as 企业微信交互层 (FastAPI + EWService)
+    participant CoreProc as 核心处理器 (主线程/分发)
+    participant Concurrency as 并发控制器 (线程池)
+    participant QueryHandler as 查询处理线程
+    participant SelectionHandler as 选择处理线程
+    participant LLMClient as LLM 服务客户端
+    participant DBInt as DB 接口
+    participant StateMgr as 状态管理器 (TTL Cache)
+    participant ScoringUtil as 评分工具
+    participant Candidate
+
+    User->>+EnterpriseWeChat: 发送消息 (私聊或应用内消息, e.g., "本科以上, 恒大干过")
+    EnterpriseWeChat->>+EWInterface: HTTP POST回调 (包含加密消息)
+    EWInterface->>EWInterface: 解密消息, 校验签名
+    EWInterface->>+CoreProc: 处理消息(decrypted_msg_dict)
+    CoreProc->>CoreProc: 校验权限 (UserID) & (缓存?)是否等待回复
+    alt 新查询
+        CoreProc->>Concurrency: 分发新查询任务(decrypted_msg_dict)
+        Concurrency->>+QueryHandler: 启动/执行任务
+        QueryHandler->>+LLMClient: 解析指令(decrypted_msg_dict.content) -> Enhanced Prompt
+        LLMClient-->>-QueryHandler: 返回结构化条件(parsed_data, e.g., education_levels=["本科", "硕士", "博士"], previous_companies=["恒大"])
+        QueryHandler->>QueryHandler: 构建 DB 查询 (mongo_query, handles ranges, synonyms, ambiguity with $in, $regex, $or)
+        QueryHandler->>+DBInt: 查询候选人池(mongo_query, offset=0, limit=M)
+        DBInt-->>-QueryHandler: 返回候选人池 (candidates_pool)
+        alt 找到候选人
+            QueryHandler->>+ScoringUtil: 计算得分(parsed_data, candidates_pool, scoring_rules)
+            ScoringUtil-->>-QueryHandler: 返回带分数的列表/映射
+            QueryHandler->>QueryHandler: 按得分排序候选人池
+            QueryHandler->>QueryHandler: 选择 Top N 候选人 (top_n_candidates)
+            QueryHandler->>+LLMClient: 生成简要对比分析(parsed_data, top_n_candidates)
+            LLMClient-->>-QueryHandler: 返回分析摘要(summary)
+            QueryHandler->>QueryHandler: 格式化 Top N 结果消息 (含列表+摘要+选项)
+            QueryHandler->>+StateMgr: 缓存(上下文, top_n_candidates_info, paths, 映射, next_offset, has_more, TTL=3min, key=UserID)
+            StateMgr-->>-QueryHandler: 缓存成功
+            QueryHandler->>CoreProc: 准备发送消息(Top N 结果列表)
+            CoreProc->>EWInterface: 指令：发送文本(Top N 结果列表, to=UserID)
+            EWInterface->>+EnterpriseWeChat: 调用企微API发送消息
+            EnterpriseWeChat-->>-User: 显示 Top N 候选人列表和选项
+        else 未找到候选人 (首次查询)
+            QueryHandler->>CoreProc: 准备发送消息("未找到")
+            CoreProc->>EWInterface: 指令：发送文本("未找到" 提示, to=UserID)
+            EWInterface->>+EnterpriseWeChat: 调用企微API发送消息
+            EnterpriseWeChat-->>-User: 显示 "未找到" 提示
+        end
+        QueryHandler-->>-Concurrency: 任务完成
+    else 等待回复
+        CoreProc->>Concurrency: 分发选择任务(decrypted_msg_dict, cached_state)
+        Concurrency->>+SelectionHandler: 启动/执行任务
+        SelectionHandler->>SelectionHandler: 解析用户回复指令 (decrypted_msg_dict.content)
+        alt 回复 简历 X
+            SelectionHandler->>+StateMgr: 获取简历路径(X)
+            StateMgr-->>-SelectionHandler: 返回 path
+            SelectionHandler->>CoreProc: 准备发送文件(path)
+            CoreProc->>EWInterface: 指令：上传临时素材(path)
+            EWInterface-->>EWInterface: 获取 media_id
+            EWInterface->>EWInterface: 指令：发送文件(media_id, to=UserID)
+            EWInterface->>EnterpriseWeChat: 调用企微API发送文件
+            EnterpriseWeChat->>User: 收到简历文件
+            SelectionHandler->>+StateMgr: 刷新 TTL
+            StateMgr-->>-SelectionHandler: TTL已刷新
+        else 回复 信息 X
+            SelectionHandler->>+StateMgr: 获取详细信息(X)
+            StateMgr-->>-SelectionHandler: 返回 info
+            SelectionHandler->>SelectionHandler: 格式化信息
+            SelectionHandler->>CoreProc: 准备发送文本(info)
+            CoreProc->>EWInterface: 指令：发送文本(info, to=UserID)
+            EWInterface->>EnterpriseWeChat: 调用企微API发送消息
+            EnterpriseWeChat->>User: 收到详细信息
+            SelectionHandler->>+StateMgr: 刷新 TTL
+            StateMgr-->>-SelectionHandler: TTL已刷新
+        else 回复 联系 X
+            SelectionHandler->>+StateMgr: 获取候选人 wxid/企业微信外部联系人标识(X)
+            StateMgr-->>-SelectionHandler: 返回 contact_id
+            SelectionHandler->>CoreProc: 准备联系候选人(contact_id, 模板)
+            CoreProc->>EWInterface: 指令：发送文本(沟通消息, to=Candidate.contact_id)
+            EWInterface->>+EnterpriseWeChat: 调用企微API发送消息 (可能需通过客服接口或外部联系人接口)
+            EnterpriseWeChat-->>-Candidate: 收到初步沟通消息
+            SelectionHandler->>CoreProc: 准备发送确认(用户)
+            CoreProc->>EWInterface: 指令：发送文本(确认消息, to=UserID)
+            EWInterface->>+EnterpriseWeChat: 调用企微API发送消息
+            EnterpriseWeChat-->>-User: 显示确认消息
+            SelectionHandler->>+StateMgr: 清除状态
+            StateMgr-->>-SelectionHandler: 清除成功
+        else 回复 A (查看更多)
+            SelectionHandler->>+StateMgr: 获取缓存的查询条件和偏移量 (offset)
+            StateMgr-->>-SelectionHandler: 返回条件和偏移量
+            SelectionHandler->>+DBInt: 查询候选人(条件, offset=offset, limit=N)
+            DBInt-->>-SelectionHandler: 返回下一批候选人列表 (next_candidates)
+            alt 找到更多候选人
+                SelectionHandler->>+LLMClient: 生成简要对比分析(条件, next_candidates)
+                LLMClient-->>-SelectionHandler: 返回分析摘要(summary)
+                SelectionHandler->>SelectionHandler: 格式化新结果消息
+                SelectionHandler->>+StateMgr: 更新缓存(上下文, 新列表信息, 新映射, TTL=3min)
+                StateMgr-->>-SelectionHandler: 缓存更新成功
+                SelectionHandler->>CoreProc: 准备发送消息(新结果列表)
+                CoreProc->>EWInterface: 指令：发送文本(新结果列表, to=UserID)
+                EWInterface->>+EnterpriseWeChat: 调用企微API发送消息
+                EnterpriseWeChat-->>-User: 显示新候选人列表和选项
+            else 未找到更多候选人
+                SelectionHandler->>CoreProc: 准备发送消息("无更多")
+                CoreProc->>EWInterface: 指令：发送文本("无更多" 提示, to=UserID)
+                EWInterface->>+EnterpriseWeChat: 调用企微API发送消息
+                EnterpriseWeChat-->>-User: 显示 "无更多" 提示
+                SelectionHandler->>+StateMgr: 清除状态
+                StateMgr-->>-SelectionHandler: 清除成功
+            end
+        else 回复 B (都不满意)
+            SelectionHandler->>CoreProc: 准备发送消息("已了解")
+            CoreProc->>EWInterface: 指令：发送文本("已了解" 提示, to=UserID)
+            EWInterface->>+EnterpriseWeChat: 调用企微API发送消息
+            EnterpriseWeChat-->>-User: 显示提示
+            SelectionHandler->>+StateMgr: 清除状态
+            StateMgr-->>-SelectionHandler: 清除成功
+        else 无效回复或超时 (由 StateMgr TTL 触发)
+            SelectionHandler->>CoreProc: 准备发送消息(提示)
+            CoreProc->>EWInterface: 指令：发送文本(提示消息, to=UserID)
+            EWInterface->>+EnterpriseWeChat: 调用企微API发送消息
+            EnterpriseWeChat-->>-User: 显示提示
+            StateMgr->>StateMgr: (自动) 清除过期状态
+        end
+        SelectionHandler-->>-Concurrency: 任务完成
+    end
+```
+
+### 6.2 后台简历处理流程
+
+(基本不变，同 procedure.md 中的流程图)
+
+```mermaid
+sequenceDiagram
+    participant Scheduler as 触发器/调度器
+    participant Pipeline as 简历处理管道
+    participant Scanner as 文件扫描器
+    participant TextExtractor as 文本提取器
+    participant OCR as OCR 模块
+    participant LLMClient as LLM 服务客户端
+    participant Validator as 校验与标准化器
+    participant FileManager as 文件管理器
+    participant DBInt as DB 接口
+    participant Logger
+
+    Scheduler->>+Pipeline: 启动处理任务
+    Pipeline->>+Scanner: 扫描 data/ 目录
+    Scanner-->>-Pipeline: 返回 PDF 文件列表
+    loop 每个 PDF 文件
+        Pipeline->>+TextExtractor: 提取文本(pdf_path)
+        TextExtractor-->>-Pipeline: 返回文本内容
+        alt 文本为空或提取失败
+            Pipeline->>+OCR: OCR处理(pdf_path)
+            OCR-->>-Pipeline: 返回OCR文本
+        end
+        alt 文本提取/OCR 均失败
+            Pipeline->>+FileManager: 移动到 error/
+            Pipeline->>+Logger: 记录错误
+            FileManager-->>-Pipeline: 完成
+            Logger-->>-Pipeline: 完成
+            next # 跳过当前文件
+        end
+        Pipeline->>+LLMClient: 解析简历(文本)
+        LLMClient->>LLMClient: 调用 DeepSeek API
+        LLMClient-->>-Pipeline: 返回结构化JSON
+        alt LLM 解析失败
+            Pipeline->>+FileManager: 移动到 error/
+            Pipeline->>+Logger: 记录错误 (含LLM详情)
+            FileManager-->>-Pipeline: 完成
+            Logger-->>-Pipeline: 完成
+            next # 跳过当前文件
+        end
+        Pipeline->>+Validator: 校验关键信息 & 生成文件名(JSON)
+        Validator-->>-Pipeline: 返回校验结果 & 标准化文件名/路径
+        alt 关键信息缺失
+            Pipeline->>+FileManager: 移动到 pending/
+            Pipeline->>+Logger: 记录待处理原因
+            FileManager-->>-Pipeline: 完成
+            Logger-->>-Pipeline: 完成
+            next # 跳过当前文件
+        end
+        Pipeline->>+FileManager: 移动/重命名文件(原始路径, processed_resumes/路径)
+        FileManager-->>-Pipeline: 文件操作结果
+        alt 文件操作失败
+            Pipeline->>+Logger: 记录严重文件错误
+            Logger-->>-Pipeline: 完成
+            next # 可能需要重试或标记错误
+        end
+        Pipeline->>+DBInt: Upsert 候选人(JSON, 标准化路径)
+        DBInt-->>-Pipeline: 数据库操作结果
+        alt 数据库操作失败
+             Pipeline->>+Logger: 记录严重数据库错误
+             Logger-->>-Pipeline: 完成
+             # 可能需要回滚文件移动或标记不一致
+        end
+        Pipeline->>+Logger: 记录处理成功
+        Logger-->>-Pipeline: 完成
+    end
+    Pipeline-->>-Scheduler: 处理完成 (或返回状态报告)
+
+```
+
+## 7. 部署考虑
+
+*   **操作系统:** Windows (如果依赖 Tesseract OCR 的 Windows 安装包) 或 Linux (通用 FastAPI 部署)。
+*   **企业微信应用配置:** 确保 CorpID, AgentID, Secret, Token, AESKey 正确配置，回调 URL 指向部署的 FastAPI 应用。
+*   **回调服务器:**
+    *   需要一个公网可访问的 HTTPS 端点。
+    *   使用 FastAPI + Uvicorn (或 Hypercorn) 运行应用。
+    *   推荐使用 Nginx 或 Caddy 作为反向代理，处理 HTTPS 终止和负载均衡 (如果需要)。
+*   **依赖安装:** 使用 `requirements.txt` (包含 `fastapi`, `uvicorn`, `httpx`, `pycryptodome`, `xmltodict`, `pymongo`, `openai`, `PyYAML`/`python-dotenv`, `logging`, `cachetools`, PDF/OCR 库)。
+*   **Tesseract OCR (可选):** 如果使用，确保在服务器上正确安装和配置，并设置好 `TESSDATA_PREFIX` 环境变量。
+*   **后台任务:** (简历处理管道) 配置 Windows 任务计划程序、Linux Cron 或 `APScheduler`。
+*   **资源:** 考虑 CPU、内存（多线程、缓存、LLM）、网络带宽。
+
+## 8. 错误处理策略
+
+*   **日志先行:** 记录详细日志，包含时间戳、模块名、线程ID (可选)、错误信息、相关数据。
+*   **区分错误级别:** 使用 `logging` 级别。
+*   **`wcferry` 异常:** 捕获、记录、通知/重试。 (此条目在企业微信版中应移除或修改为企业微信API调用异常)
+*   **企业微信 API 异常:** 捕获网络、超时、认证、权限、速率限制等错误。实施重试。记录详细信息，反馈用户或管理员。
+*   **企业微信回调处理异常:** 确保任何情况下都能给企业微信服务器返回一个即时响应 (通常是空字符串)，以避免重试。详细记录内部错误。
+*   **数据库异常:** 捕获连接和操作错误。记录。考虑关键写入失败的补偿。
+*   **文件处理异常:** 捕获 IO 错误。后台处理移至错误目录。
+*   **用户输入/选择错误/无效:** 发送清晰提示。
+*   **[v1.1 新增] 并发错误:** 捕获线程执行异常，记录日志。
+*   **[v1.1 新增] 缓存错误:** 捕获缓存操作异常，记录。
+*   **[v1.1 新增] TTL 超时:** 由缓存机制处理，可选地在超时后通知用户。
+*   **LLM 解析质量问题:** 对于 LLM 返回结果不准确或与预期偏差较大的情况（查询、简历、摘要），记录原始输入和 LLM 输出，便于分析和优化 Prompt。**注意：尽管 Prompt 已优化，处理学历范围、同义词、职位/证书歧义等复杂情况仍可能存在边缘错误。**
+*   **数据库查询无结果:** 未找到符合条件的候选人时告知用户。模糊匹配（如证书、公司）可能返回过多或过少结果，需监控效果。
+*   **简历处理失败分类:** 明确区分临时错误、永久文件问题、信息提取不全、系统内部错误。
+
+## 9. 项目目录结构
+
+(基本不变，确认 `state_manager.py` 在 `src/` 或 `src/utils/` 下，并体现企业微信相关文件)
+
+```
+HR_Project_Bot/
+│
+├── .venv/
+├── .cursor/
+│   └── rules/
+│       ├── ... (其他规则文件)
+│       └── architecture.mdc
+│
+├── data/
+│   ├── error/
+│   └── pending/
+│
+├── processed_resumes/
+│
+├── src/
+│   ├── main_ew.py                # <--- 企业微信回调主应用 (FastAPI)
+│   ├── enterprise_wechat_service.py # <--- 企业微信API服务封装
+│   ├── core_processor.py
+│   ├── db_interface.py
+│   ├── llm_client.py
+│   ├── config.py                 # 主要配置文件加载
+│   ├── config_ew.py              # <--- 企业微信特定配置加载
+│   ├── logger.py
+│   ├── state_manager.py
+│   │
+│   ├── handlers/
+│   │   ├── __init__.py
+│   │   ├── auth_handler.py       # (可能需要 auth_handler_ew.py 或适配)
+│   │   ├── intent_handler.py
+│   │   ├── query_handler.py
+│   │   └── selection_handler.py
+│   │
+│   ├── models/
+│   │   ├── __init__.py
+│   │   └── candidate.py
+│   │
+│   ├── resume_pipeline/
+│   │   ├── __init__.py
+│   │   ├── ... (管道各模块)
+│   │
+│   └── utils/
+│       ├── __init__.py
+│       └── scoring_utils.py
+│       └── WXBizMsgCrypt.py      # <--- 企业微信消息加解密库
+│
+├── tests/
+│   ├── __init__.py
+│   ├── ... (各模块测试文件)
+│
+├── config.yaml
+├── .env                        # <--- 包含企业微信敏感配置
+├── requirements.txt
+├── README.md                   # (可能需要 README_EW.md 或更新)
+└── .gitignore
+```
+
+**目录说明:**
+
+*   **`docs/`**: 存放所有项目相关的设计和需求文档。
+*   **`data/`**: 存放原始简历，子目录用于分类处理过程中的文件状态。
+*   **`processed_resumes/`**: 存放成功处理后的简历，路径会记录在数据库中。
+*   **`src/`**: 包含所有核心应用代码，按照功能模块划分。
+    *   **`handlers/`**: 将核心处理器按具体职责细分。
+    *   **`models/`**: 定义数据结构。
+    *   **`resume_pipeline/`**: 封装简历处理的各个步骤。
+    *   **`utils/`**: 放置可重用的辅助函数。
+*   **`tests/`**: 组织测试代码，对应 `src/` 中的模块。
+*   **根目录文件**: 包含配置文件、依赖列表、项目说明和 Git 配置。

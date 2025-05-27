@@ -1,0 +1,107 @@
+# config.yaml (示例)
+
+deepseek:
+  api_key:  # 你的 DeepSeek API Key
+  base_url: https://api.deepseek.com/v1
+  query_model: deepseek-chat
+  resume_model: deepseek-chat
+
+mongodb:
+  uri: mongodb://localhost:27017/
+  database: hr_bot_db
+  collection: candidates
+
+
+# ... 其他配置 ...
+
+
+
+message_templates:
+  greeting: |
+    你好，[候选人姓名]！我们是[你的名字/公司名]，通过[平台/渠道]了解到您在[职位名称]领域的经验非常匹配我们正在招聘的职位。
+
+    [简要职责]
+
+    我们很希望能和您聊聊这个机会。如果您方便的话，请告知您何时有空？
+
+    谢谢！
+    [招聘人员姓名]
+    ([招聘人员联系方式]) # 可选
+
+paths:
+  data_dir: data
+  processed_dir: processed_resumes
+  error_dir: data/error
+  pending_dir: data/pending
+
+# 可选: OCR 配置
+ocr:
+  tesseract_cmd: 'C:/Program Files/Tesseract-OCR/tesseract.exe' # 根据你的安装路径修改
+
+# ... 其他可能的配置 ...
+
+# [新增] 候选人评分与排序规则
+scoring_rules:
+  # 初步检索的候选人数量 (用于内部排序)
+  initial_candidate_pool_size: 30
+  # 每个评分维度的配置
+  dimensions:
+    # 1. 工作经验匹配
+    experience:
+      weight: 30 # 该维度权重 (百分比或绝对分值)
+      enabled: true # 是否启用此维度
+      logic:
+        type: range_match # 评分逻辑类型
+        # 如何从查询条件中获取要求的值
+        required_value_path: query.criteria.experience_years_min # 假设LLM解析结果路径
+        # 如何从候选人数据中获取用于比较的值
+        candidate_value_path: candidate.query_tags.min_experience_years # 数据库字段路径
+        params:
+          # 范围匹配的具体参数
+          exact_match_score: 1.0 # 满足最低要求的基础得分比例
+          tolerance_years: 1    # 向下容忍年限 (例如允许比要求低1年)
+          score_decay_rate: 0.3 # 在容忍范围内，每低于要求1年，分数降低率
+          min_score: 0.1        # 最低得分比例 (防止0分)
+          bonus_rate_per_year: 0.05 # 每超出最低要求一年，增加的分数比例 (相对于exact_match_score)
+          max_score_factor: 1.5     # 最高得分因子 (最终得分不超过 exact_match_score * max_score_factor)
+    # 2. 技能匹配
+    skills:
+      weight: 20
+      enabled: true
+      logic:
+        type: keyword_overlap
+        required_value_path: query.criteria.skills # 要求技能列表
+        candidate_value_path: candidate.query_tags.skills_normalized # 候选人技能列表 (已小写标准化)
+        params:
+          # 关键词重叠评分参数
+          # (可选) 可以区分核心技能和加分技能
+          score_per_match: 1.0 # 每匹配一个技能的基础得分
+          # (可选) normalization_factor: candidate_total_skills # 可以按候选人总技能数做归一化?
+          # (可选) required_skill_weight: 2.0 # 核心技能权重?
+    # 3. 地点匹配
+    location:
+      weight: 40
+      enabled: true
+      logic:
+        type: exact_match # 或 proximity_match
+        required_value_path: query.criteria.location
+        candidate_value_path: candidate.query_tags.location
+        params:
+          match_score: 1.0
+          mismatch_score: 0.0
+          # (可选) proximity_scores: {"同城不同区": 0.7, "邻近城市": 0.5}
+    # 4. 证书匹配
+    certifications:
+      weight: 30
+      enabled: true
+      logic:
+        type: keyword_presence
+        required_value_path: query.criteria.certifications # 要求证书列表
+        candidate_value_path: candidate.query_tags.certifications # 候选人持有证书列表
+        params:
+          score_per_match: 1.0 # 每匹配一个证书的基础得分
+          max_score: 1.0 # 此维度最高得分比例 (可能持有多个证书，但得分不超过1)
+
+  # (可选) 总分归一化设置
+  # normalize_total_score: true
+  # target_max_score: 100
