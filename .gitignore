@@ -128,8 +128,38 @@ cython_debug/
 !.vscode/extensions.json
 *.code-workspace
 
-# Custom
+# Custom - 项目特定忽略规则
 *.log
-#config.yaml
-# data/ # 根据实际情况决定是否忽略，如果简历需要共享则不忽略
+logs/
+app.log
+
+# 敏感数据和处理结果 - 包含个人简历等敏感信息
 processed_resumes/
+*.pdf
+
+# 原始数据目录 - 保留目录结构但忽略具体文件
+data/*
+!data/.gitkeep
+!data/error/
+!data/pending/
+data/error/*
+!data/error/.gitkeep
+data/pending/*
+!data/pending/.gitkeep
+
+# 配置文件 - 包含敏感信息
+.env
+config_local.yaml
+
+# IDE和编辑器
+.idea/
+.cursor/
+*.swp
+*.swo
+*~
+
+# 临时文件
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
