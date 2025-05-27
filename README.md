@@ -97,7 +97,7 @@
 ### 1. 环境准备
 ```bash
 # 克隆项目
-git clone <[https://github.com/lin2000wl/WECOM_HR_PROJECT.git]>
+git clone https://github.com/lin2000wl/WECOM_HR_PROJECT.git
 cd HR_Project_Bot_2.0
 
 # 创建虚拟环境
