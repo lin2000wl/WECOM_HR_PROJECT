@@ -1,0 +1,26 @@
+pymongo
+requests
+PyYAML
+dotenv
+schedule
+PyPDF2
+openai
+reportlab 
+pytesseract 
+pdf2image 
+
+mongomock
+pytest 
+
+fastapi
+uvicorn[standard]
+httpx
+pycryptodome>=3.19.0
+xmltodict
+python-dotenv
+cachetools
+# PyPDF2 # 如果简历处理需要
+# pdfminer.six # 如果简历处理需要
+# pytesseract # 如果简历处理需要OCR
+# unstructured # 企业微信版PRD中提到用于简历解析，可以后续添加 
+apscheduler # 新增APScheduler依赖 
