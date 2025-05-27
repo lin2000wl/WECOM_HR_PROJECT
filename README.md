@@ -7,10 +7,18 @@
 ## 项目概述
 
 本项目是一个完整的智能招聘解决方案，包含以下核心组件：
-1. **智能招聘机器人主服务** - 通过企业微信应用处理招聘查询和简历管理
-2. **URL验证服务** (`url_verification/`) - 独立的企业微信回调URL验证服务
-3. **代理转发服务** (`wework_proxy_app/`) - HTTP代理转发服务，解决内网部署问题
-4. **后台简历处理流程** - 自动化处理和入库PDF简历
+
+### 🎯 主要服务组件
+1. **智能招聘机器人主服务** (`src/`) - 通过企业微信应用处理招聘查询和简历管理的核心服务
+2. **URL验证服务** (`url_verification/`) - 独立的企业微信回调URL验证服务，用于开发调试和回调测试
+3. **代理转发服务** (`wework_proxy_app/`) - HTTP代理转发服务，解决内网部署与企业微信公网回调的连接问题
+4. **后台简历处理流程** - 自动化处理和入库PDF简历的离线处理系统
+
+### 🏗️ 架构优势
+- **模块化设计:** 各服务独立部署，可根据需要灵活组合
+- **开发友好:** URL验证服务便于快速测试企业微信回调配置
+- **部署灵活:** 代理服务解决内网部署难题，支持多种网络环境
+- **生产就绪:** 完整的错误处理、日志记录和监控机制
 
 ## 主要功能
 
@@ -389,8 +397,8 @@ curl "http://localhost:8502/wework-callback/test"
 - 同步失败：5
 
 ❌ 以下联系人同步失败：
-1. [张三1234] [woAJ2GCAAAXtWyujaWJHDDGi0mACAAA]
-2. [李四5678] [woAJ2GCAAAXtWyujaWJHDDGi0mACBBB]
+[张三] [external_userid_123] - 原因：手机号格式不正确
+[李四] [external_userid_456] - 原因：数据库中未找到匹配记录
 ```
 
 ### 后台简历处理
@@ -402,40 +410,136 @@ python src/resume_pipeline/trigger.py
 tail -f logs/resume_processing.log
 ```
 
-## 部署指南
+### URL验证服务使用指南
 
-### 生产环境部署架构
+**适用场景：**
+- 企业微信回调URL配置测试
+- 开发环境快速验证
+- 消息加解密功能调试
+- 回调参数格式验证
 
+**配置步骤：**
+1. **配置环境变量** (`url_verification/.env`)：
+```env
+FLASK_APP=app.py
+FLASK_RUN_PORT=8502
+FLASK_DEBUG=True
+WECOM_CORP_ID="your_corp_id"
+WECOM_CALLBACK_TOKEN="your_callback_token"
+WECOM_CALLBACK_AES_KEY="your_callback_aes_key"
 ```
-[企业微信] → [公网域名+SSL] → [Nginx] → [主服务/代理服务] → [内网服务]
+
+2. **启动验证服务：**
+```bash
+cd url_verification
+python app.py
 ```
 
-### 推荐部署方案
+3. **配置企业微信回调URL：**
+   - URL: `https://your_domain.com/` 或 `https://your_domain.com/wework-callback`
+   - 支持多种路径格式：`/`, `/wework-callback`, `/wechat_callback`
 
-1. **单机部署:** 所有服务运行在同一台服务器
-2. **分离部署:** 代理服务部署在公网，主服务部署在内网
-3. **容器化部署:** 使用Docker容器化各个服务
+**调试功能：**
+- 详细的请求日志记录
+- 加解密过程可视化
+- 错误信息详细输出
+- 支持GET验证和POST消息接收
 
-### 安全配置
+### 代理转发服务使用指南
 
-1. **网络安全:**
-   - 配置防火墙规则
-   - 使用HTTPS证书
-   - 限制API访问IP
+**适用场景：**
+- 内网服务器部署，需要公网回调访问
+- 多环境部署（开发/测试/生产）
+- 负载均衡和故障转移
+- 网络隔离环境下的服务连接
 
-2. **数据安全:**
-   - MongoDB访问控制
-   - 敏感信息加密存储
-   - 定期备份数据
+**部署架构：**
+```
+企业微信服务器 → 公网代理服务器 → 内网目标服务器
+     ↓                    ↓                ↓
+  回调请求         wework_proxy_app      主招聘服务
+```
 
-3. **应用安全:**
-   - 关闭调试模式
-   - 配置日志轮转
-   - 监控异常访问
+**配置步骤：**
+1. **公网服务器配置** (`wework_proxy_app/.env`)：
+```env
+FLASK_APP=app.py
+FLASK_RUN_PORT=8502
+FLASK_DEBUG=False  # 生产环境
+TARGET_SERVER_URL="http://192.168.1.100:8502"  # 内网目标服务器
+```
+
+2. **启动代理服务：**
+```bash
+cd wework_proxy_app
+python app.py
+```
+
+3. **Nginx配置示例：**
+```nginx
+upstream hr_bot_proxy {
+    server 127.0.0.1:8502;
+    # 可配置多个代理实例实现负载均衡
+    # server 127.0.0.1:8503 backup;
+}
+
+server {
+    listen 443 ssl;
+    server_name your_domain.com;
+    
+    location /wework-callback/ {
+        proxy_pass http://hr_bot_proxy/wework-callback/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # 超时配置
+        proxy_connect_timeout 30s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 30s;
+    }
+}
+```
+
+**监控和故障排除：**
+- 代理服务提供详细的转发日志
+- 支持超时和连接错误处理
+- 自动重试机制（可配置）
+- 健康检查端点
+
+### 服务部署最佳实践
+
+**开发环境：**
+```bash
+# 1. 使用URL验证服务快速测试
+cd url_verification && python app.py
+
+# 2. 配置内网穿透（如ngrok）
+ngrok http 8502
+
+# 3. 在企业微信后台配置ngrok提供的公网URL
+```
+
+**生产环境：**
+```bash
+# 1. 使用代理转发模式
+# 公网服务器运行代理服务
+cd wework_proxy_app && python app.py
+
+# 2. 内网服务器运行主服务
+cd .. && python src/main_ew.py
+
+# 3. 配置Nginx反向代理和SSL
+# 4. 使用Supervisor管理进程
+# 5. 配置日志轮转和监控
+```
 
 ## 监控与维护
 
 ### 关键监控指标
+
+**主服务监控：**
 *   **服务可用性:** 各服务的运行状态和响应时间
 *   **消息处理:** 企业微信消息接收和处理成功率
 *   **LLM调用:** API调用次数、成功率、响应时间
@@ -443,47 +547,155 @@ tail -f logs/resume_processing.log
 *   **简历处理:** 处理成功率、错误分类统计
 *   **外部联系人同步:** 同步成功率、失败原因分析
 
+**URL验证服务监控：**
+*   **验证成功率:** 企业微信回调URL验证的成功率
+*   **加解密性能:** 消息加解密处理时间
+*   **错误率:** 验证失败和解密错误的频率
+*   **请求量:** 验证请求的数量和频率
+
+**代理转发服务监控：**
+*   **转发成功率:** HTTP请求转发的成功率
+*   **响应时间:** 端到端请求响应时间
+*   **目标服务健康:** 内网目标服务器的可达性
+*   **连接池状态:** 并发连接数和连接池使用情况
+*   **错误类型分布:** 超时、连接失败等错误的分类统计
+
 ### 日志管理
+
+**主服务日志：**
 *   **应用日志:** `logs/app.log` - 主要业务逻辑日志
 *   **错误日志:** `logs/error.log` - 错误和异常信息
-*   **访问日志:** Nginx访问日志
 *   **简历处理日志:** 简历处理流程的详细记录
 
+**URL验证服务日志：**
+*   **验证日志:** `url_verification/logs/` - URL验证和消息处理日志
+*   **加解密日志:** 详细的加解密过程记录
+*   **调试日志:** 开发环境下的详细调试信息
+
+**代理转发服务日志：**
+*   **转发日志:** `wework_proxy_app/logs/` - 请求转发记录
+*   **性能日志:** 响应时间和性能指标
+*   **错误日志:** 转发失败和连接错误记录
+
+**系统日志：**
+*   **Nginx访问日志:** 反向代理访问记录
+*   **Supervisor日志:** 进程管理和重启记录
+
 ### 维护建议
+
+**日常维护：**
 *   **定期检查:** 每日检查服务状态和错误日志
 *   **数据备份:** 定期备份MongoDB数据和简历文件
 *   **依赖更新:** 定期更新Python依赖包
 *   **性能优化:** 根据使用情况调整配置参数
 *   **容量规划:** 监控存储空间和数据库大小
 
+**安全维护：**
+*   **证书更新:** 定期更新SSL证书
+*   **密钥轮换:** 定期更换企业微信Token和AESKey
+*   **访问审计:** 检查异常访问和登录记录
+*   **权限检查:** 验证文件和目录权限设置
+
+**服务维护：**
+*   **进程监控:** 使用Supervisor确保服务自动重启
+*   **资源监控:** 监控CPU、内存、磁盘使用情况
+*   **网络监控:** 检查网络连接和带宽使用
+*   **依赖服务:** 监控MongoDB、Nginx等依赖服务状态
+
 ### 故障排除
 
-**常见问题:**
+**企业微信回调相关问题：**
 
-1. **企业微信回调失败**
-   - 检查回调URL配置
-   - 验证Token和AESKey
-   - 查看URL验证服务日志
+1. **回调URL验证失败**
+   ```bash
+   # 检查URL验证服务
+   cd url_verification
+   python app.py
+   # 查看验证日志
+   tail -f logs/verification.log
+   ```
+   - 检查CorpID、Token、AESKey配置
+   - 验证公网域名和SSL证书
+   - 使用URL验证服务进行调试
 
-2. **LLM调用失败**
-   - 检查API Key配置
-   - 验证网络连接
-   - 查看API调用日志
+2. **消息接收失败**
+   ```bash
+   # 检查主服务日志
+   tail -f logs/app.log | grep "callback"
+   # 检查代理转发日志
+   cd wework_proxy_app && tail -f logs/proxy.log
+   ```
+   - 验证回调URL路径配置
+   - 检查代理转发服务状态
+   - 确认内网目标服务器可达性
 
-3. **数据库连接问题**
+**代理转发相关问题：**
+
+3. **代理转发超时**
+   ```bash
+   # 检查目标服务器连通性
+   curl -v http://target-server:8502/health
+   # 调整超时配置
+   vim wework_proxy_app/.env
+   ```
+   - 检查TARGET_SERVER_URL配置
+   - 验证内网网络连接
+   - 调整超时参数设置
+
+4. **负载均衡问题**
+   ```bash
+   # 检查Nginx配置
+   nginx -t
+   # 重载Nginx配置
+   nginx -s reload
+   ```
+   - 验证upstream配置
+   - 检查健康检查设置
+   - 监控后端服务状态
+
+**服务性能问题：**
+
+5. **LLM调用失败**
+   - 检查API Key配置和余额
+   - 验证网络连接和防火墙
+   - 查看API调用日志和错误码
+
+6. **数据库连接问题**
    - 检查MongoDB服务状态
-   - 验证连接字符串
-   - 查看数据库日志
+   - 验证连接字符串和认证
+   - 监控连接池使用情况
 
-4. **简历处理失败**
-   - 检查文件权限
-   - 验证OCR组件安装
-   - 查看处理日志
+7. **简历处理失败**
+   - 检查文件权限和存储空间
+   - 验证OCR组件安装和配置
+   - 查看处理日志和错误分类
 
-5. **外部联系人同步问题**
-   - 检查企业微信API权限
-   - 验证标签ID配置
-   - 查看同步日志
+8. **外部联系人同步问题**
+   - 检查企业微信API权限和配额
+   - 验证标签ID和HR用户ID配置
+   - 查看同步日志和失败原因
+
+**紧急故障处理：**
+
+```bash
+# 快速重启所有服务
+sudo supervisorctl restart all
+
+# 检查服务状态
+sudo supervisorctl status
+
+# 查看最近的错误日志
+tail -n 100 /var/log/hr_bot_*_error.log
+
+# 检查系统资源
+top
+df -h
+free -m
+
+# 检查网络连接
+netstat -tlnp | grep :8502
+curl -I https://your_domain.com/api/v1/wecom/callback
+```
 
 ## 开发指南
 
