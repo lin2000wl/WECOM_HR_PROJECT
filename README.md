@@ -150,8 +150,6 @@ HR_Project_Bot_2.0/
 │   └── pending/               # 待人工处理的文件
 ├── processed_resumes/         # 处理成功的简历
 ├── logs/                      # 日志文件
-├── tests/                     # 测试文件
-├── docs/                      # 项目文档
 ├── config.yaml               # 主配置文件
 ├── requirements.txt          # 主项目依赖
 ├── .env.example             # 环境变量示例
@@ -710,18 +708,6 @@ curl -I https://your_domain.com/api/v1/wecom/callback
 *   **自定义评分规则:** 修改`config.yaml`中的评分配置
 *   **新增消息类型:** 在handlers中添加新的处理逻辑
 *   **集成其他服务:** 通过API接口集成外部系统
-
-### 测试
-```bash
-# 运行单元测试
-python -m pytest tests/
-
-# 运行特定测试
-python -m pytest tests/test_llm_client.py
-
-# 生成测试覆盖率报告
-python -m pytest --cov=src tests/
-```
 
 ## 许可证
 
